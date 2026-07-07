@@ -1,10 +1,10 @@
 # SecureOps: Technical Specification
 
-Version 1.0
+Version 1.1
 Last updated: July 2026
-Status: Draft, pre-implementation
+Status: Implemented and tested, updated to match the final submitted system
 
-This document is the source of truth for the SecureOps build. It defines what the system does, how its components interact, what data it stores, and what correct and incorrect behavior look like. Code should be generated and reviewed against this specification, not the other way around.
+This document is the source of truth for the SecureOps build. It defines what the system does, how its components interact, what data it stores, and what correct and incorrect behavior look like. Where implementation decisions during the build diverged from the original design, this document has been updated to reflect what was actually shipped, with the reasoning for each change stated explicitly rather than left silent.
 
 ---
 
@@ -27,7 +27,7 @@ The person building this system has a background in ServiceNow-based AI architec
 
 ### 1.4 Course concepts demonstrated
 
-This project intentionally demonstrates well beyond the rubric's minimum of three key concepts. The required minimum, multi-agent orchestration, MCP, and agent skills, are covered as a baseline. Beyond that, the system also demonstrates context engineering, memory (session and persistent), observability, evaluation, Spec-Driven Development, and a fail-closed security gating pattern. These are listed here for traceability, not as a checklist to pad the document.
+Four of the six named evaluation concepts are demonstrated, above the rubric's minimum of three: multi-agent orchestration via ADK, security features (the fail-closed Security Guardian), Antigravity (the entire system was built inside it), and Agent Skills (a custom `secureops-security-audit` skill, saved in the repository, that reviews this codebase for security issues; see Section 10). MCP Server integration was scoped originally but not implemented; see Section 9. Beyond the named six, the system also demonstrates context engineering, session and persistent memory, observability, evaluation, and Spec-Driven Development, this document being the artifact of that last one.
 
 ---
 
@@ -55,16 +55,18 @@ runtime:
 frameworks:
   google_adk: "2.3.0"
   google_genai: "2.10.0"
+  streamlit: "1.59.0"
 models:
-  security_guardian: "gemini-2.5-pro"
-  orchestrator: "gemini-2.5-pro"
+  security_guardian: "gemini-2.5-flash"
+  orchestrator: "gemini-2.5-flash"
   intake_agent: "gemini-2.5-flash"
   knowledge_retrieval_agent: "gemini-2.5-flash"
   resolution_agent: "gemini-2.5-flash"
   knowledge_extraction_agent: "gemini-2.5-flash"
+embedding_model: "gemini-embedding-001"
 storage:
-  vector_store: "ChromaDB"
-  relational_db: "SQLite via SQLAlchemy"
+  vector_store: "ChromaDB (cosine similarity)"
+  relational_db: "SQLite via SQLAlchemy 2.0"
 supporting_libraries:
   - "python-dotenv"
   - "fastapi"
@@ -75,7 +77,7 @@ supporting_libraries:
 
 ### 2.4 Model selection rationale
 
-Model assignment follows a cost- and risk-aware split rather than a uniform default. The Security Guardian and the orchestrator carry the highest consequence if they make a wrong call: a missed prompt injection or a bad routing decision affects everything downstream. Both use Gemini 2.5 Pro for stronger reasoning. Intake, Knowledge Retrieval, Resolution, and Knowledge Extraction are high-throughput, lower-consequence tasks, and use Gemini 2.5 Flash for speed and cost efficiency.
+The original design assigned Gemini 2.5 Pro to the Security Guardian and the orchestrator, reserving Flash for the remaining agents, on the reasoning that the highest-consequence decisions deserved the strongest available reasoning. During implementation, Gemini 2.5 Pro's free tier was found to require a billing-enabled Google Cloud project, confirmed by a `limit: 0` quota response, which is a zero-entitlement signal distinct from genuine quota exhaustion (which reports a nonzero limit). Given the project timeline, all five agents were moved to Gemini 2.5 Flash to keep the submission fully reproducible without introducing a billing dependency. Flash's structured output support, via `response_schema`, proved sufficient for the classification and reasoning tasks this system requires, including the Security Guardian's semantic gating.
 
 ---
 
@@ -87,7 +89,7 @@ Responsibility: validate every incoming request before any other agent processes
 
 ```yaml
 agent: security_guardian
-model: gemini-2.5-pro
+model: gemini-2.5-flash
 position: mandatory_first_checkpoint
 failure_mode: fail_closed
 input:
@@ -123,11 +125,12 @@ output:
 
 ### 3.3 Knowledge Retrieval Agent
 
-Responsibility: query ChromaDB for relevant knowledge articles or prior resolved tickets matching the current request.
+Responsibility: query ChromaDB for relevant knowledge articles or prior resolved tickets matching the current request. Embeddings are generated with `gemini-embedding-001` through a shared `GeminiEmbeddingFunction` (in `embeddings.py`), used identically by this agent and by Knowledge Extraction, so both always embed against the same model.
 
 ```yaml
 agent: knowledge_retrieval_agent
 model: gemini-2.5-flash
+embedding_model: gemini-embedding-001
 input:
   ticket_id: string
   category: string
@@ -135,23 +138,30 @@ input:
 output:
   matched_articles: list of object
     article_id: string
+    title: string
+    content: string
     similarity_score: float
   confidence: float
 ```
-The confidence threshold of 0.65 was determined empirically, not assumed. Testing against the seeded knowledge base using gemini-embedding-001 showed that genuine matches (a ticket correctly corresponding to a relevant article) scored between 0.70 and 0.80, while an unrelated ticket against the same knowledge base scored 0.60. This reflects a general property of embedding models rather than a limitation specific to this one: cosine similarity between conceptually related but non-identical natural language text typically clusters in the 0.55 to 0.85 range, since the model is measuring semantic proximity, not exact repetition. A threshold set too high, such as 0.75, would reject legitimate matches and force unnecessary escalations, undermining the resolution flywheel this system is built around. The chosen threshold reflects the actual separation observed between true and false matches in this domain's data, and should be re-validated if the knowledge base grows substantially or the embedding model changes.
 
 ### 3.4 Resolution Agent
 
-Responsibility: propose a resolution using retrieved knowledge. Escalates to a human when confidence falls below a defined threshold.
+Responsibility: propose a resolution using retrieved knowledge, but only after two independent checks agree, not one. First, retrieval confidence must clear `RESOLUTION_CONFIDENCE_THRESHOLD`. Second, the agent itself must report whether it can genuinely ground a resolution in the retrieved content (`can_resolve`), since a confidence score above threshold does not guarantee the retrieved articles actually address the ticket's specific problem, a gap found directly during testing (a Wi-Fi connectivity ticket scored above threshold against VPN-related articles that did not solve it). If either check fails, the ticket escalates to a human rather than auto-resolving.
+
+The threshold itself is empirically tuned, not an assumed value. Testing against the seeded knowledge base with `gemini-embedding-001` showed genuine matches scoring 0.70 to 0.80, while an unrelated query against the same knowledge base scored 0.60. General-purpose embedding models score conceptually related but non-identical text in roughly the 0.55 to 0.85 range, not near 1.0, so a higher, more intuitive-looking threshold such as 0.75 was tested and found to incorrectly reject genuine matches. The threshold is set to 0.65, the gap actually observed between true and false matches in this domain's data.
 
 ```yaml
 agent: resolution_agent
 model: gemini-2.5-flash
+confidence_threshold: 0.65
+failure_mode: escalate_on_any_uncertainty
 input:
   ticket_id: string
+  summary: string
   matched_articles: list of object
   confidence: float
 output:
+  can_resolve: boolean
   resolution_text: string, nullable
   action: enum [auto_resolve, escalate]
   escalation_reason: string, nullable
@@ -269,6 +279,15 @@ Checks performed by the Guardian include detection of prompt injection patterns,
 
 Escalation to a human is a separate mechanism from security rejection. Escalation happens when the Resolution Agent has low confidence in a proposed fix. Rejection happens when the Security Guardian determines the input itself should not proceed. These are tracked in separate tables (escalations and security_events) because they represent different failure categories and should not be conflated in reporting.
 
+### 6.1 Differentiated failure handling per agent
+
+During testing, a live API quota failure crashed the entire pipeline through an unhandled exception, revealing that fail-closed behavior had only been implemented for the Security Guardian, not the other four agents. Each agent's failure response is now matched to the actual consequence of that agent failing, rather than one generic error-handling pattern applied everywhere:
+
+- **Security Guardian:** any failure results in rejection. Security-critical, fail-closed.
+- **Resolution Agent:** any failure results in escalation to a human. Availability-critical; never fabricates a resolution.
+- **Intake Agent:** any failure still creates a ticket, using safe fallback values (`category: Unclassified`, `priority: medium`, `status: needs_triage`), so a classification failure never causes a request to silently disappear.
+- **Knowledge Extraction Agent:** any failure is logged and skipped. This step runs after the ticket is already resolved, so a missed knowledge-capture opportunity is a minor issue compared to disrupting an already-completed resolution.
+
 ---
 
 ## 7. Knowledge Flywheel
@@ -333,8 +352,22 @@ And the rejection reason should distinguish this from a security risk rejection
 The following were part of the original architectural exploration but are explicitly deprioritized for this submission, given the timeline. They are named here rather than silently dropped, since the reasoning itself is a documented trade-off, consistent with the Day 5 material's emphasis on architecture as a series of explicit decisions.
 
 - **Cloud Run deployment.** The rubric accepts a public GitHub repository with detailed setup instructions as an alternative to a live deployed demo. Given the scoring weight (70 of 100 points on code quality and documentation), time is better spent on the codebase and README than on deployment infrastructure.
-- **A2A protocol (Agent Card).** Valuable for demonstrating cross-agent interoperability, but additive to the required minimum concept count. Treated as a stretch goal only if time remains after the core system is complete.
+- **A2A protocol (Agent Card).** Valuable for demonstrating cross-agent interoperability, but additive to the required minimum concept count and not pursued given the timeline.
 - **Microsoft Docs MCP server consumption.** Same reasoning as above. The system is designed so this can be added later as an additional tool on the Knowledge Retrieval Agent without changing the existing architecture.
+
+---
+
+## 10. Additions Beyond the Original Scope
+
+Two things were built during implementation that were not part of the original specification, and are documented here since they materially affect the submission.
+
+### 10.1 Security audit skill
+
+A custom Agent Skill, `secureops-security-audit` (saved at `.agents/skills/secureops-security-audit/`), was built and run inside Antigravity against the full Python codebase. It produced 10 findings across four severity tiers, from a real cross-site scripting vector in the Streamlit interface to a duplicated embedding function across two agent files. Nine of ten were fixed directly; the tenth, module-level API client instantiation, is accepted as a reasonable trade-off for a project of this scope. Full findings are documented in the README's Security Hardening section. This skill is itself the evidence for the Agent Skills concept named in Section 1.4.
+
+### 10.2 Interactive demo interface
+
+`app.py` provides a Streamlit-based chat interface as an additional way to interact with the pipeline, beyond the ADK-wrapped agent and the test scripts. It presents a conversational window alongside a live "Agent Activity" panel that reports each stage's status in plain language as the request moves through the pipeline, useful both for demonstration purposes and as a more approachable way to verify the system's behavior than reading structured logs.
 
 ---
 
