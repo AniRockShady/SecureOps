@@ -1,5 +1,7 @@
 # SecureOps
 
+![SecureOps banner](images/SECUREOPS.png)
+
 **Submitted to:** AI Agents: Intensive Vibe Coding Capstone Project (Kaggle) - Agents for Business track
 
 An agentic IT Service Management (ITSM) platform built on Google ADK and Gemini. SecureOps classifies and resolves IT support tickets using retrieval-augmented generation and automatically grows its own knowledge base from resolved work, with every request passing through mandatory security validation before any processing occurs.
