@@ -122,7 +122,8 @@ Nine of ten findings were fixed directly; the tenth (module-level client instant
 │   ├── secureops_thumbnail.png      # Kaggle submission thumbnail
 │   └── secureops_logo_*.png         # Brand mark, dark and light variants
 ├── .agents/
-│   └── secureops-security-audit/    # Custom Agent Skill: security review of this codebase
+│   └── skills/
+│       └── secureops-security-audit/  # Custom Agent Skill: security review of this codebase
 ├── models.py                        # SQLAlchemy ORM models (8 tables)
 ├── database.py                      # Engine and session setup
 ├── init_db.py                       # Database initialization script
