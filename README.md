@@ -156,7 +156,7 @@ A few early exploratory scripts (`test.py`, `adk_smoke_test.py`, `check_tables.p
 ### Installation
 
 ```bash
-git clone <this-repository-url>
+git clone https://github.com/AniRockShady/SecureOps.git
 cd secureops
 
 python -m venv venv
